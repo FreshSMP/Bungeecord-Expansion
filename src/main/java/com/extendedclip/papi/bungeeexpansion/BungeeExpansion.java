@@ -5,24 +5,29 @@ import com.google.common.collect.Iterables;
 import com.google.common.io.ByteArrayDataInput;
 import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
-import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import me.clip.placeholderapi.expansion.Configurable;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import me.clip.placeholderapi.expansion.Taskable;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 
-public final class BungeeExpansion extends PlaceholderExpansion implements PluginMessageListener, Taskable, Configurable {
+public final class BungeeExpansion extends PlaceholderExpansion
+        implements PluginMessageListener, Taskable, Configurable, Listener {
 
     private static final String MESSAGE_CHANNEL = "BungeeCord";
     private static final String SERVERS_CHANNEL = "GetServers";
@@ -31,8 +36,8 @@ public final class BungeeExpansion extends PlaceholderExpansion implements Plugi
 
     private static final Splitter SPLITTER = Splitter.on(",").trimResults();
 
-    private final Map<String, Integer>           counts = new ConcurrentHashMap<>();
-    private final AtomicReference<ScheduledTask> cached = new AtomicReference<>();
+    private final Map<String, Integer> counts = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> unchangedCounts = new ConcurrentHashMap<>();
 
     @Override
     public @NotNull String getIdentifier() {
@@ -55,7 +60,7 @@ public final class BungeeExpansion extends PlaceholderExpansion implements Plugi
     }
 
     @Override
-    public String onRequest(final OfflinePlayer player, String identifier) {
+    public String onRequest(@NotNull OfflinePlayer player, @NotNull String identifier) {
         final int value;
 
         switch (identifier.toLowerCase()) {
@@ -68,43 +73,42 @@ public final class BungeeExpansion extends PlaceholderExpansion implements Plugi
 
     @Override
     public void start() {
-        final ScheduledTask task = Bukkit.getGlobalRegionScheduler().runAtFixedRate(getPlaceholderAPI(), scheduledTask -> {
-
-            if (counts.isEmpty()) {
-                sendServersChannelMessage();
-            }
-            else {
-                for (String server : counts.keySet().toArray(new String[0])) {
-                    sendPlayersChannelMessage(server);
-                }
-            }
-        }, 20L * 2L, 20L * getLong(CONFIG_INTERVAL, 30));
-
-        final ScheduledTask prev = cached.getAndSet(task);
-        if (prev != null) {
-            prev.cancel();
-        } else {
-            Bukkit.getMessenger().registerOutgoingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL);
-            Bukkit.getMessenger().registerIncomingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL, this);
-        }
+        Bukkit.getMessenger().registerOutgoingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL);
+        Bukkit.getMessenger().registerIncomingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL, this);
+        Bukkit.getPluginManager().registerEvents(this, getPlaceholderAPI());
     }
 
     @Override
     public void stop() {
-        final ScheduledTask prev = cached.getAndSet(null);
-        if (prev == null) {
-            return;
-        }
-
-        prev.cancel();
         counts.clear();
-
+        unchangedCounts.clear();
         Bukkit.getMessenger().unregisterOutgoingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL);
         Bukkit.getMessenger().unregisterIncomingPluginChannel(getPlaceholderAPI(), MESSAGE_CHANNEL, this);
+        HandlerList.unregisterAll(this);
+    }
+
+    @EventHandler
+    public void onPlayerJoin(@NotNull PlayerJoinEvent event) {
+        if (counts.isEmpty()) {
+            sendServersChannelMessage();
+        } else {
+            for (String server : counts.keySet()) {
+                sendPlayersChannelMessage(server);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onPlayerQuit(@NotNull PlayerQuitEvent event) {
+        if (!counts.isEmpty()) {
+            for (String server : counts.keySet()) {
+                sendPlayersChannelMessage(server);
+            }
+        }
     }
 
     @Override
-    public void onPluginMessageReceived(final @NotNull String channel, final @NotNull Player player, final byte[] message) {
+    public void onPluginMessageReceived(@NotNull String channel, @NotNull Player player, byte[] message) {
         if (!MESSAGE_CHANNEL.equals(channel)) {
             return;
         }
@@ -114,15 +118,36 @@ public final class BungeeExpansion extends PlaceholderExpansion implements Plugi
             switch (in.readUTF()) {
                 case PLAYERS_CHANNEL -> {
                     final String server = in.readUTF();
-                    int count = 0;
                     try {
-                        count = in.readInt();
+                        final int newCount = in.readInt();
+                        final int oldCount = counts.getOrDefault(server.toLowerCase(), -1);
+
+                        if (oldCount == newCount) {
+                            final int unchanged = unchangedCounts
+                                    .computeIfAbsent(server.toLowerCase(), k -> new AtomicInteger(0))
+                                    .incrementAndGet();
+                            if (unchanged > 3) {
+                                Bukkit.getLogger().info("[BungeeExpansion] Count for server '" + server +
+                                        "' paused at " + newCount + " for " + unchanged + " updates.");
+                            }
+                        } else {
+                            unchangedCounts.put(server.toLowerCase(), new AtomicInteger(0));
+                        }
+
+                        counts.put(server.toLowerCase(), newCount);
                     } catch (Exception e) {
-                        getPlaceholderAPI().getLogger().log(Level.SEVERE, String.format("[%s] Could not get the player count from server %s.", getName(), server));
+                        getPlaceholderAPI().getLogger().log(
+                                Level.SEVERE,
+                                "[" + getName() + "] Could not get the player count from server " + server + "."
+                        );
                     }
-                    counts.put(server.toLowerCase(), count);
                 }
-                case SERVERS_CHANNEL -> SPLITTER.split(in.readUTF()).forEach(serverName -> counts.putIfAbsent(serverName.toLowerCase(), 0));
+                case SERVERS_CHANNEL -> {
+                    final String serversString = in.readUTF();
+                    Bukkit.getLogger().info("[BungeeExpansion] Received server list: " + serversString);
+                    SPLITTER.split(serversString)
+                            .forEach(name -> counts.putIfAbsent(name.toLowerCase(), 0));
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -133,25 +158,20 @@ public final class BungeeExpansion extends PlaceholderExpansion implements Plugi
         sendMessage(SERVERS_CHANNEL, out -> { });
     }
 
-    private void sendPlayersChannelMessage(final String serverName) {
+    private void sendPlayersChannelMessage(@NotNull String serverName) {
         sendMessage(PLAYERS_CHANNEL, out -> out.writeUTF(serverName));
     }
 
-    private void sendMessage(final String channel, final Consumer<ByteArrayDataOutput> consumer) {
+    private void sendMessage(@NotNull String subChannel, @NotNull Consumer<ByteArrayDataOutput> consumer) {
         final Player player = Iterables.getFirst(Bukkit.getOnlinePlayers(), null);
         if (player == null) {
             return;
         }
 
         final ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeUTF(channel);
-
+        out.writeUTF(subChannel);
         consumer.accept(out);
 
-        player.getScheduler().run(getPlaceholderAPI(), scheduledTask -> {
-            if (player.isOnline()) {
-                player.sendPluginMessage(getPlaceholderAPI(), MESSAGE_CHANNEL, out.toByteArray());
-            }
-        }, null);
+        player.sendPluginMessage(getPlaceholderAPI(), MESSAGE_CHANNEL, out.toByteArray());
     }
 }
