@@ -24,7 +24,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.logging.Level;
 
 public final class BungeeExpansion extends PlaceholderExpansion
         implements PluginMessageListener, Taskable, Configurable, Listener {
@@ -123,34 +122,24 @@ public final class BungeeExpansion extends PlaceholderExpansion
                         final int oldCount = counts.getOrDefault(server.toLowerCase(), -1);
 
                         if (oldCount == newCount) {
-                            final int unchanged = unchangedCounts
+                            unchangedCounts
                                     .computeIfAbsent(server.toLowerCase(), k -> new AtomicInteger(0))
                                     .incrementAndGet();
-                            if (unchanged > 3) {
-                                Bukkit.getLogger().info("[BungeeExpansion] Count for server '" + server +
-                                        "' paused at " + newCount + " for " + unchanged + " updates.");
-                            }
                         } else {
                             unchangedCounts.put(server.toLowerCase(), new AtomicInteger(0));
                         }
 
                         counts.put(server.toLowerCase(), newCount);
-                    } catch (Exception e) {
-                        getPlaceholderAPI().getLogger().log(
-                                Level.SEVERE,
-                                "[" + getName() + "] Could not get the player count from server " + server + "."
-                        );
+                    } catch (Exception ignored) {
                     }
                 }
                 case SERVERS_CHANNEL -> {
                     final String serversString = in.readUTF();
-                    Bukkit.getLogger().info("[BungeeExpansion] Received server list: " + serversString);
                     SPLITTER.split(serversString)
                             .forEach(name -> counts.putIfAbsent(name.toLowerCase(), 0));
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Exception ignored) {
         }
     }
 
