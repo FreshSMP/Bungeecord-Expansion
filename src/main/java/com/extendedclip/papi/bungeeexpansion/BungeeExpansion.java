@@ -113,33 +113,27 @@ public final class BungeeExpansion extends PlaceholderExpansion
         }
 
         final ByteArrayDataInput in = ByteStreams.newDataInput(message);
-        try {
-            switch (in.readUTF()) {
-                case PLAYERS_CHANNEL -> {
-                    final String server = in.readUTF();
-                    try {
-                        final int newCount = in.readInt();
-                        final int oldCount = counts.getOrDefault(server.toLowerCase(), -1);
+        switch (in.readUTF()) {
+            case PLAYERS_CHANNEL -> {
+                final String server = in.readUTF();
+                final int newCount = in.readInt();
+                final int oldCount = counts.getOrDefault(server.toLowerCase(), -1);
 
-                        if (oldCount == newCount) {
-                            unchangedCounts
-                                    .computeIfAbsent(server.toLowerCase(), k -> new AtomicInteger(0))
-                                    .incrementAndGet();
-                        } else {
-                            unchangedCounts.put(server.toLowerCase(), new AtomicInteger(0));
-                        }
+                if (oldCount == newCount) {
+                    unchangedCounts
+                            .computeIfAbsent(server.toLowerCase(), k -> new AtomicInteger(0))
+                            .incrementAndGet();
+                } else {
+                    unchangedCounts.put(server.toLowerCase(), new AtomicInteger(0));
+                }
 
-                        counts.put(server.toLowerCase(), newCount);
-                    } catch (Exception ignored) {
-                    }
-                }
-                case SERVERS_CHANNEL -> {
-                    final String serversString = in.readUTF();
-                    SPLITTER.split(serversString)
-                            .forEach(name -> counts.putIfAbsent(name.toLowerCase(), 0));
-                }
+                counts.put(server.toLowerCase(), newCount);
             }
-        } catch (Exception ignored) {
+            case SERVERS_CHANNEL -> {
+                final String serversString = in.readUTF();
+                SPLITTER.split(serversString)
+                        .forEach(name -> counts.putIfAbsent(name.toLowerCase(), 0));
+            }
         }
     }
 
